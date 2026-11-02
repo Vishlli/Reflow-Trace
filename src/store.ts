@@ -7,6 +7,9 @@ import {
   FACILITIES, INSTITUTION, TRANSPORTERS, buildAudit, buildBatches, buildPoints,
   buildResolvedDiscrepancies, nextEvidence,
 } from './data/fixtures';
+import type { BinReading } from './services/mqttClient';
+
+const LIVE_POINT_ID = 'DP-D-01';
 
 export const ROLE_LABEL: Record<Role, string> = {
   admin: 'Institution admin', collector: 'Collector', transporter: 'Transporter',
@@ -75,6 +78,7 @@ interface State {
   addBatchNote: (batchId: string, text: string) => void;
   requestCollection: (pointId: string) => void;
   patchPoint: (id: string, patch: Partial<Point>, auditType: string) => void;
+  applyLiveReading: (r: BinReading) => void;
   regenerateQr: (pointId: string) => void;
   anonReport: (pointId: string, kind: string) => boolean;
   logAudit: (e: Omit<AuditEvent, 'id' | 'at'>) => void;
@@ -352,6 +356,25 @@ export const useStore = create<State>((set, get) => {
     patchPoint: (id, patch, auditType) => {
       set((s) => ({ points: s.points.map((p) => (p.id === id ? { ...p, ...patch } : p)) }));
       log({ actor: 'Institution admin', role: 'admin', type: auditType, entity: id, next: JSON.stringify(patch), source: 'manual' });
+    },
+    applyLiveReading: (r) => {
+      // console.log('[LIVE]', r.fill);
+      const t = clock();
+      set((s) => ({
+        points: s.points.map((p) =>
+          p.id !== LIVE_POINT_ID
+            ? p
+            : {
+                ...p,
+                fillPct: r.fill,
+                fillSource: 'sensor' as const,
+                fillAt: new Date(t).toISOString(),
+                deviceState: 'online' as const,
+                lastError: null,
+                history: [...p.history, { t, pct: r.fill }].slice(-24),
+              },
+        ),
+      }));
     },
     regenerateQr: (pointId) => {
       const p = get().points.find((x) => x.id === pointId);
