@@ -8,8 +8,28 @@ import {
   buildResolvedDiscrepancies, nextEvidence,
 } from './data/fixtures';
 import type { BinReading } from './services/mqttClient';
+import { generateBatchId } from './engine/batchId';
 
 const LIVE_POINT_ID = 'DP-D-01';
+
+const STORAGE_KEY = 'trace-saved-v1';
+const isSaved = (id?: string) => !!id && id.startsWith('MW-');
+
+function loadSaved(): { batches: Batch[]; discrepancies: Discrepancy[]; audit: AuditEvent[] } {
+  const empty = { batches: [], discrepancies: [], audit: [] };
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return empty;
+    const parsed = JSON.parse(raw);
+    return {
+      batches: parsed.batches ?? [],
+      discrepancies: parsed.discrepancies ?? [],
+      audit: parsed.audit ?? [],
+    };
+  } catch {
+    return empty;
+  }
+}
 
 export const ROLE_LABEL: Record<Role, string> = {
   admin: 'Institution admin', collector: 'Collector', transporter: 'Transporter',
@@ -158,7 +178,13 @@ export const useStore = create<State>((set, get) => {
     setTimeout(() => get().dismissToast(id), 5200);
   }
 
+  const saved = loadSaved();
   const fresh = seed();
+  fresh.batches = [...fresh.batches, ...saved.batches].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  fresh.discrepancies = [...fresh.discrepancies, ...saved.discrepancies];
+  fresh.audit = [...fresh.audit, ...saved.audit].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  fresh.discSeq = Math.max(fresh.discSeq, ...saved.discrepancies.map((d) => Number(d.id.replace('DISC-', '')) + 1));
+  auditSeq = Math.max(auditSeq, ...saved.audit.map((e) => Number(e.id.replace('AUD-', ''))));
 
   return {
     role: (() => { try { return (sessionStorage.getItem('trace-role') as Role | null) || null; } catch { return null; } })(),
@@ -221,7 +247,7 @@ export const useStore = create<State>((set, get) => {
       if (!(massKg > 0)) return { ok: false, error: 'Mass must be above zero.' };
       const point = s.points.find((p) => p.id === pointId);
       if (!point) return { ok: false, error: 'Unknown disposal point.' };
-      const id = `BATCH-${s.batchSeq}`;
+      const id = generateBatchId(pointId, new Date(clock()), new Set(s.batches.map((b) => b.id)));
       const at = new Date(clock()).toISOString();
       const held = s.offline;
       const sensorKg = null;
@@ -401,7 +427,7 @@ export const useStore = create<State>((set, get) => {
       const nowMs = clock();
       set({ mode: 'DEMO' });
       const mk = (pid: string, kg: number, o: { upTo: StepKey; r2?: number; r1?: number; r3?: number; fac?: string; attest?: StepKey; ageH?: number }) => {
-        const id = `BATCH-${get().batchSeq}`;
+        const id = generateBatchId(pid, new Date(nowMs), new Set(get().batches.map((b) => b.id)));
         set((st) => ({ batchSeq: st.batchSeq + 1 }));
         const t0 = nowMs - (o.ageH ?? 8) * 3600_000;
         const fac = FACILITIES.find((f) => f.id === (o.fac ?? 'fac_1'))!;
@@ -462,3 +488,15 @@ export function evalAll(batches: Batch[], config: Config, now: number) {
 }
 
 export { FACILITIES, TRANSPORTERS, INSTITUTION, fmtKg, fmtPct };
+
+let lastSavedJson = '';
+useStore.subscribe((s) => {
+  const json = JSON.stringify({
+    batches: s.batches.filter((b) => isSaved(b.id)),
+    discrepancies: s.discrepancies.filter((d) => isSaved(d.batchId)),
+    audit: s.audit.filter((e) => isSaved(e.batchId)),
+  });
+  if (json === lastSavedJson) return;
+  lastSavedJson = json;
+  try { localStorage.setItem(STORAGE_KEY, json); } catch { /* storage unavailable */ }
+});
